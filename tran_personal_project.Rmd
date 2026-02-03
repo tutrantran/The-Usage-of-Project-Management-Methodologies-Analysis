@@ -1,0 +1,494 @@
+---
+title: 'USING ART ANOVA, MULTIPLE REGRESSION, AND MONTE CARLO SIMULATION TO SELECT THE USAGE OF PROJECT MANAGEMENT METHODOLOGIES: WATERFALL, AGILE, AND SCRUM'
+author: "Tu Tran Tran"
+date: "November 3rd, 2025"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# **INTRODUCTION**
+
+This research aims to explain how Waterfall, Agile, and Scrum methodologies work in project management, and explore how Monte Carlo Simulation can help to select the correct method. Even though there have been multiple case studies of how each method can bring great results in certain conditions and vice versa, it is uncertain that the progress of a project will not be affected by scope creeps or the number of change requests. By understanding the importance of using the correct method, Project Managers can lead their team successfully throughout the whole project with excellent deliverables.
+
+The research will be based on the following questions:
+
+1.  Which project management methodology (Waterfall, Agile, or Scrum) leads to the highest project success rating across varying project conditions?
+2.  After controlling for risk, cost overrun, and schedule variance, does methodology still have a meaningful impact on project success?
+3.  Under uncertainty, what is the probability that each methodology achieves high success (e.g., \>80), and which methodology has the lowest downside risk?
+
+# **1. DATASET OVERVIEW**
+
+## **1.1. Data Generation Methodology**
+
+This study utilizes a synthetic project portfolio dataset consisting of **1,000 project observations**.\
+
+The dataset was constructed algorithmically using simulated probability distributions to mimic realistic patterns and causal mechanisms commonly observed in software and IT project environments.
+
+## **1.2. Variable Design Logic**
+
+The dataset contains three major variable types:
+
+| Layer | Variable Types | Purpose |
+|------------------------|------------------------|------------------------|
+| Classification Layer | methodology, complexity_level | define project category |
+| Uncertainty Calibration Layer | risk_score, budget_overrun_pct, schedule_variance_days, technical_debt_index, etc. | simulate operational variation |
+| Outcome Layer | success_rating, client_satisfaction, ROI_pct | define project performance |
+
+In this dataset, the risk_score variable represents the project’s overall risk exposure on a normalized scale from 0 to 1. It was not generated randomly across all projects but rather through a structured, logic-based approach that reflects how risk naturally depends on project complexity.
+
+Specifically, risk values were drawn from bounded uniform distributions that vary by complexity level:
+
+| Complexity Level | Distribution Used for risk_score |
+|------------------|----------------------------------|
+| Low              | Uniform(0.20 – 0.50)             |
+| Medium           | Uniform(0.40 – 0.70)             |
+| High             | Uniform(0.60 – 0.90)             |
+
+This approach reflects established project management theory, where higher complexity is associated with greater uncertainty and a higher likelihood of emerging risks. In practice, risk levels do not fluctuate randomly across unrelated projects but are fundamentally linked to the inherent characteristics of the project. Stratifying risk by complexity therefore produces more realistic variation and allows the dataset to reflect the clustering patterns commonly observed in real-world IT project environments.
+
+## **1.3. Distributional Assumptions**
+
+Each continuous variable was drawn from a probability distribution grounded in domain reality:
+
+| Variable | Distribution Applied | Rationale |
+|------------------------|------------------------|------------------------|
+| budget_estimate_millionUSD | Triangular(2,5,10) | realistic bounded cost estimates |
+| budget_overrun_pct | Normal (mean varies by methodology) | Waterfall projects typically have higher overruns |
+| schedule_variance_days | Normal (mean varies by methodology) | Waterfall tends to delay more than Agile/Scrum |
+| risk_score | Uniform (range depends on complexity) | high complexity → higher risk ranges |
+| stakeholder_alignment | Normal(μ=4,σ=0.6) | based on 1–5 Likert distribution |
+| technical_debt_index | Uniform(0–1) | debt accumulates as a bounded ratio |
+
+## **1.4. Structural Causality Model for Success**
+
+Crucially, **success_rating is not random noise**.\
+It is generated using a deterministic causal formula which encodes domain theory:
+
+```         
+success_rating = 100
+                     - (risk_score * 40)
+                     - (budget_overrun_pct * 0.5)
+                     - (schedule_variance_days / 10)
+                     + (communication_efficiency * 5)
+                     + (stakeholder_alignment * 2)
+                     - (technical_debt_index * 10)
+```
+
+This reflects established project management research that:
+
+-   risk is the strongest negative driver of project success
+-   cost & schedule performance reduce success
+-   communication quality and stakeholder alignment increase success
+-   technical debt destroys future performance
+
+| Variable Name | Measurement Unit / Scale | Variable Type |
+|------------------------|------------------------|------------------------|
+| `project_id` | integer identifier | identifier |
+| `methodology` | categorical (Waterfall / Agile / Scrum) | categorical |
+| `complexity_level` | categorical (Low / Medium / High) | categorical |
+| `budget_estimate_millionUSD` | millions of USD | continuous numeric |
+| `budget_overrun_pct` | percentage (%) | continuous numeric |
+| `schedule_variance_days` | number of days | continuous numeric |
+| `scope_changes` | count of change requests | discrete count |
+| `team_size` | number of team members | discrete count |
+| `risk_score` | normalized index 0–1 | numeric index |
+| `communication_efficiency` | normalized index 0–1 | numeric index |
+| `stakeholder_alignment` | Likert scale 1–5 | ordinal Likert |
+| `iteration_count` | number of iterations / sprints | discrete count |
+| `technical_debt_index` | normalized index 0–1 | numeric index |
+| `success_rating` | 0–100 continuous score | continuous numeric |
+| `client_satisfaction` | Likert scale 1–5 | ordinal Likert |
+| `ROI_pct` | percentage (%) | continuous numeric |
+
+# **2. PREPARATION**
+
+This phase will make sure that the dataset is fully loaded and factor levels are standardized so that Waterfall and High become the baseline categories for all subsequent models.
+
+## **2.1. Import data**
+
+```{r}
+project_portfolio <- read.csv("project_portfolio_dataset_expanded_1000.csv")
+View(project_portfolio)
+```
+
+## **2.2. Define variables**
+
+```{r}
+project_portfolio$methodology <- factor(project_portfolio$methodology, levels=c("Waterfall","Agile","Scrum"))
+project_portfolio$complexity_level <- factor(project_portfolio$complexity_level, levels=c("High","Medium","Low"))
+```
+
+## **2.3. Required Libraries**
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(nortest)
+library(car)
+library(ARTool)
+library(gt)
+library(MASS)
+library(cowplot)
+library(matrixcalc)
+library(Matrix)
+library(tidyr)
+library(tibble)
+```
+
+# **3. ANOVA ANALYSIS METHODOLOGY**
+
+## **3.1. Select the required variables for the analysis**
+
+```{r}
+project_portfolio <- project_portfolio %>%
+  dplyr::select(success_rating, methodology, complexity_level)
+View(project_portfolio)
+```
+
+## **3.2. Test ANOVA assumptions**
+
+There are 4 variables requirements for ANOVA analysis:
+
+a\. The samples are independent: methodology, complexity_level
+
+b\. The dependent variable is a continuous variable (success_rating)
+
+c\. Normality: The dependent variables should be approximately normally distributed within each group
+
+d\. Homogeneity of variance
+
+### **3.2.1. Using Shapiro-Wilk Test for residuals normality**
+
+-   H₀ (null hypothesis): Residuals follow a normal distribution.
+-   H₁ (alternative hypothesis): Residuals do not follow a normal distribution.
+
+If p-value \< 0.05, we reject H₀, indicating that the residuals deviate from normality.
+
+```{r}
+anova_residuals <- rstandard(aov(success_rating~methodology*complexity_level, data = project_portfolio))
+    
+shapiro.test(anova_residuals)
+```
+
+With p = 0.0053 \< 0.05, there is statistical evidence that the residuals are not perfectly normal.
+
+### **3.2.2. Using qqplot and bell-curve histogram to visualize the residuals normality**
+
+```{r}
+## qqplot
+qqnorm(anova_residuals)
+qqline(anova_residuals)
+     
+## histogram + overlay bell-curve
+df_residuals <- data.frame(residuals = anova_residuals)
+mean_res <- mean(df_residuals$residuals)
+sd_res <- sd(df_residuals$residuals)
+
+ggplot(df_residuals, aes(x = residuals)) +
+          geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "lightblue", color = "black") +
+          stat_function(fun = dnorm, args = list(mean = mean_res, sd = sd_res),
+                        color = "red", linewidth = 1) +
+          labs(title = "Histogram of ANOVA Residuals with Bell Curve",
+               x = "Residuals", y = "Density") +
+          theme_minimal()
+```
+
+Although the Shapiro-Wilk test returned a p-value of 0.005301 (indicating statistical deviation from normality),with a sample size of 1000, the test’s sensitivity may exaggerate minor deviations. The Q-Q plot and histogram (bell-curve) confirms that the deviation from normality is very slight and not practically concerning.
+
+### **3.2.3. Using Levene Test for homogeneity of variance**
+
+-   H₀ (null hypothesis): The groups have equal variances.
+-   H₁ (alternative hypothesis): At least one group has a different variance.
+
+```{r}
+leveneTest(success_rating~methodology*complexity_level, data = project_portfolio)
+
+ggplot(project_portfolio, aes(x = interaction(methodology, complexity_level),
+                              y = success_rating,
+                              fill = methodology)) + 
+    geom_boxplot() +
+    labs(title = "Boxplot of Success Rating by Methodology × Complexity Level",
+       x = "Methodology × Complexity Level",
+       y = "Success Rating") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+With a p-value ≈ 0.000000000001356, we strongly reject H₀. Since the assumption of homogeneity of variance is violated, which affects the reliability of F-tests in classical ANOVA, using Aligned Rank Transform ANOVA (ART) would be better instead of the classic ANOVA Test. That is because ART ANOVA does not require assumptions of normal distribution or homogeneity of variance.
+
+## **3.3. Aligned Rank Transform ANOVA (ART)**
+
+```{r}
+art_model <- art(success_rating~methodology*complexity_level, data = project_portfolio)
+  art_anova_result <- anova(art_model) 
+  
+  View(art_anova_result)
+  
+## install.packages("gt") to visualize the result table
+
+  art_anova_result %>%
+    gt() %>%
+    tab_header(title = "ART ANOVA Results") %>%
+    fmt_number(columns = c(`F value`, `Pr(>F)`), decimals = 4)
+```
+
+The two-way nonparametric ART ANOVA results show that both project management methodology and project complexity level have statistically significant main effects on project success. Methodology has a significant effect on success_rating, F(2,991) = 28.34, p\<.001, and complexity level has an even stronger effect, F(2,991) = 375.16, p\<.001. In contrast, the interaction between methodology and complexity level is not significant, F(4,991) = 0.68, p = .604, indicating that the relative advantage of one methodology over another does not systematically change across different complexity levels. In practical terms, methodology and complexity each matter for success, but their effects appear to be additive rather than interactive.
+
+# **4. Multiple Regression**
+
+## **4.1. Model 1**
+
+In this linear regression model, the dependent variable is "success_rating" and the categorical predictors are "methodology" and "complexity_level", in which:
+
+-   "Waterfall" is the baseline for "methodology"
+-   "High" is the baseline for "complexity_level"
+
+```{r}
+lm_project_portfolio <- read.csv("project_portfolio_dataset_expanded_1000.csv")
+
+model_1 <- lm(success_rating ~ methodology + complexity_level, data = lm_project_portfolio)
+
+summary(model_1)
+```
+
+In the first multiple regression model, which includes only methodology and complexity level as predictors, the model explains approximately 43.8% of the variance in project success ( R² = 0.4378). Using Waterfall with High complexity as the baseline, Agile projects on average score about 3.8 points higher on success_rating and Scrum projects score about 5.1 points higher, both differences being statistically significant. Complexity level also has a strong impact: projects with Medium complexity score roughly 8.3 points higher than High complexity projects, while Low complexity projects score about 16.2 points higher than High complexity. These results suggest that, when considered alone, both methodology choice and complexity level are important determinants of project outcomes, with Scrum and lower-complexity projects associated with substantially higher success ratings than Waterfall and high-complexity projects.
+
+## **4.2. Model 2**
+
+```{r}
+model_2 <- lm(success_rating ~ methodology + complexity_level + risk_score + budget_overrun_pct + schedule_variance_days, data = lm_project_portfolio)
+
+summary(model_2)
+```
+
+The full regression model, which adds risk_score, budget_overrun_pct, and schedule_variance_days to methodology and complexity, has very high explanatory power, accounting for about 90.6% of the variance in success_rating (Adj R²= 0.9055) and is highly significant overall (F(7,992)=1369, p\<.001).
+
+| Term                   | Estimate | p-value | Interpretation        |
+|:-----------------------|:---------|:--------|:----------------------|
+| methodologyAgile       | +0.04    | 0.8845  | Not significant       |
+| methodologyScrum       | -0.09    | 0.7665  | Not significant       |
+| complexity_levelMedium | +0.61    | 0.0795  | marginal (not strong) |
+| complexity_levelLow    | +1.03    | 0.0555  | borderline            |
+
+| Predictor | Estimate | p-value | Meaning |
+|:-----------------|:-----------------|:-----------------|:-----------------|
+| risk_score | −37.55 | \<.001 | Higher risk score strongly reduces success rating |
+| budget_overrun_pct | −0.495 | \<.001 | Every extra % budget overrun reduces success \~0.5 points |
+| schedule_variance_days | −0.094 | \<.001 | Every extra delayed day reduces success \~0.094 points |
+
+Once these operational drivers are included, the coefficients for methodology (Agile vs. Waterfall and Scrum vs. Waterfall) become very small and statistically non-significant, and the effects of complexity level shrink and become only marginally significant. In contrast, the three continuous drivers remain large and highly significant: higher risk_score is associated with a reduction of about 37.6 points in success_rating, each additional percentage point of budget overrun reduces success by roughly 0.5 points, and each extra day of schedule delay reduces success by about 0.094 points. This pattern indicates that after controlling for risk, cost, and schedule performance, the nominal choice of methodology (Waterfall, Agile, or Scrum) no longer has a meaningful direct effect on project success. Instead, project outcomes are dominated by how well risks are managed, budgets are controlled, and schedules are maintained.
+
+# **5. MONTE CARLO SIMULATION**
+
+## **5.1. Import data and define the variables**
+
+```{r}
+mc_project_portfolio <- read.csv("project_portfolio_dataset_expanded_1000.csv") %>%
+  mutate(methodology = factor(methodology, levels = c("Waterfall","Agile","Scrum")),
+         complexity_level = factor(complexity_level, levels = c("High","Medium","Low")))
+
+View(mc_project_portfolio)
+```
+
+## **5.2. Build a full regression model for Monte Carlo simulation**
+
+```{r}
+set.seed(123)
+## fixes the random number generator so that every time you run the simulation again, you will get the exact same random numbers.
+
+model_mc <- lm(success_rating ~ methodology + complexity_level + risk_score + budget_overrun_pct + schedule_variance_days, data = mc_project_portfolio)
+
+resid_pool <- resid(model_mc)
+## During Monte Carlo, after we predict the success_rating from the regression model, we add one random residual from this pool to each simulated scenario. This action keeps the real-world variance of success_rating.
+
+print(summary(model_mc))
+```
+
+## **5.3. Define the simulation variables and the number of simulated scenarios**
+
+```{r}
+N <- 10000
+
+drivers <- c("risk_score","budget_overrun_pct","schedule_variance_days")
+
+clamp <- function(x, lo = -Inf, hi = Inf) pmax(lo, pmin(hi, x))
+## This is a small utility function to FORCE values to stay inside valid boundaries.
+```
+
+## **5.4. Simulation function for a single methodology (preserving multivariate correlation structure via mvrnorm)**
+
+```{r}
+simulate_one_method <- function(method, df, model, n = N) {
+  # 1) subset to one methodology
+  d_sub <- df[df$methodology == method, , drop = FALSE]
+  d     <- d_sub[, drivers, drop = FALSE]
+
+  # 2) mean & covariance by method
+  mu  <- colMeans(d, na.rm = TRUE)
+  Sig <- cov(d, use = "complete.obs")
+
+  # 3) ensure Sigma is positive definite
+  if (!matrixcalc::is.positive.definite(Sig)) {
+    Sig <- as.matrix(Matrix::nearPD(Sig)$mat)
+  }
+
+  # 4) draw correlated samples
+  X <- as.data.frame(MASS::mvrnorm(n, mu, Sig))
+  names(X) <- drivers
+
+  # 5) domain guards
+  X$risk_score             <- pmin(pmax(X$risk_score, 0), 1)
+  X$schedule_variance_days <- pmax(X$schedule_variance_days, 0)
+
+  # 6) set factors for prediction (BOTH are required by model_mc)
+  X$methodology <- factor(method, levels = levels(df$methodology))
+
+  # choose ONE approach for complexity_level; here we sample by empirical mix:
+  mix <- prop.table(table(d_sub$complexity_level))
+  X$complexity_level <- factor(
+    sample(names(mix), size = n, replace = TRUE, prob = as.numeric(mix)),
+    levels = levels(df$complexity_level)
+  )
+
+  # 7) predict + residual bootstrap
+  pred <- predict(model, newdata = X)
+  success_sim <- pred + sample(resid_pool, n, replace = TRUE)
+
+  # 8) tidy output
+  tibble::tibble(
+    methodology = X$methodology,
+    complexity_level = X$complexity_level,
+    risk_score = X$risk_score,
+    budget_overrun_pct = X$budget_overrun_pct,
+    schedule_variance_days = X$schedule_variance_days,
+    success_sim = success_sim
+  )
+}
+drivers <- c("risk_score","budget_overrun_pct","schedule_variance_days")
+
+```
+
+## **5.5. 10,000 scenarios for 3 methodologies**
+
+```{r}
+sim_all <- dplyr::bind_rows(
+  simulate_one_method("Waterfall", mc_project_portfolio, model_mc, N),
+  simulate_one_method("Agile",     mc_project_portfolio, model_mc, N),
+  simulate_one_method("Scrum",     mc_project_portfolio, model_mc, N)
+)
+head(sim_all)
+table(sim_all$methodology)
+```
+
+## **5.6. KPI: Mean, SD, P(\>80), P(\>70), P(\<60), P5/P50/P95**
+
+```{r}
+summ_metrics <- function(d) {
+  tibble::tibble(
+    Mean   = mean(d$success_sim),
+    SD     = sd(d$success_sim),
+    P_gt80 = mean(d$success_sim > 80),
+    P_gt70 = mean(d$success_sim > 70),
+    P_lt60 = mean(d$success_sim < 60),
+    P05    = quantile(d$success_sim, 0.05),
+    P50    = quantile(d$success_sim, 0.50),
+    P95    = quantile(d$success_sim, 0.95)
+  )
+}
+
+mc_results <- sim_all %>%
+  dplyr::group_by(methodology) %>%
+  dplyr::group_modify(~ summ_metrics(.x)) %>%
+  dplyr::ungroup()
+
+mc_results
+```
+
+**Waterfall**
+
+-   Average simulated success = **76.2**
+-   Only **36.5%** of scenarios exceed 80
+-   **8.1%** chance of success dropping below 60 (highest downside risk)
+-   Volatility is highest (**SD = 11.5** → inconsistent performance)
+
+**Agile**
+
+-   Average simulated success = **79.4**
+-   Nearly half (**47.5%**) exceed 80
+-   Very small downside: only **1.66%** fall below 60
+-   More stable than Waterfall
+
+**Scrum**
+
+-   Best average success = **81.0**
+-   Majority (**54.4%**) exceed 80 (highest upside)
+-   Very rare failure tail: only **0.55%** below 60
+-   Most consistent (**SD = 8.53** → lowest uncertainty)
+
+**Business Insights**
+
+a\. Scrum is the most reliable methodology for success, in which:
+
+-   Best average success (81.0)
+-   Highest chance to exceed executive success threshold (\>80)
+-   Lowest failure risk (\<60)
+-   Most stable (lowest variance)
+
+b\. Waterfall is the worst performer.\
+c. Agile is in between, better than Waterfall, but not as strong as Scrum.
+
+Overall, the Monte Carlo results suggest that Scrum offers the best risk–return profile, Agile occupies a middle position, and Waterfall is clearly the weakest option in terms of both expected performance and downside risk.
+
+## **5.7. Empirical Cumulative Distribution Function (ECDF)**
+
+```{r}
+p_ecdf <- ggplot(sim_all, aes(x = success_sim, color = methodology)) +
+  stat_ecdf(linewidth = 1) +
+  labs(title = "ECDF of Simulated Success Rating by Methodology",
+       x = "Simulated Success Rating", y = "ECDF") +
+  theme_minimal(base_size = 12)
+p_ecdf
+```
+
+The empirical cumulative distribution function (ECDF) curves provide a visual comparison of the entire distribution of simulated outcomes across methodologies. The Waterfall ECDF lies furthest to the left and climbs the fastest, which means that for any given success threshold, Waterfall accumulates probability mass more quickly at lower scores, implying a higher likelihood of poor performance. The Agile ECDF sits between Waterfall and Scrum, indicating that Agile projects generally perform better than Waterfall but do not match Scrum’s performance. Scrum’s ECDF curve is consistently the lowest across the range of success values, meaning that the probability of achieving higher success scores is greatest under Scrum. At executive thresholds such as success_rating \> 80, Scrum has the largest proportion of scenarios above the line, followed by Agile, and then Waterfall. This confirms that Scrum dominates in terms of the overall distribution of outcomes, Agile is a moderate improvement, and Waterfall is dominated by both alternatives.
+
+## **5.8. Tornado Chart - Spearman ρ**
+
+```{r}
+sens_tbl <- sim_all %>%
+  tidyr::pivot_longer(cols = all_of(drivers), names_to = "driver", values_to = "value") %>%
+  dplyr::group_by(methodology, driver) %>%
+  dplyr::summarise(rho = suppressWarnings(cor(value, success_sim, method = "spearman")),
+                   .groups = "drop") %>%
+  dplyr::mutate(rho_abs = abs(rho))
+
+p_tornado <- ggplot(sens_tbl, aes(x = reorder(driver, rho_abs), y = rho_abs, fill = driver)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ methodology, scales = "free_y") +
+  labs(title = "Tornado – Sensitivity by |Spearman ρ|",
+       x = "Driver", y = "|Spearman ρ|") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none")
+p_tornado
+```
+
+The Tornado chart, based on the absolute Spearman rank correlations between each driver and simulated success_rating, shows a clear ranking of sensitivity across the three methodologies. In all cases, risk_score exhibits the strongest (most negative) association with project success, indicating that increases in risk systematically push outcomes toward lower success scores, regardless of whether the project uses Waterfall, Agile, or Scrum. Budget_overrun_pct emerges as the second most influential driver, with higher cost overruns consistently associated with reduced success. Schedule_variance_days has the smallest absolute correlation, meaning that while schedule delays do harm performance, their marginal effect is weaker compared with risk and cost overruns in this dataset. Together, these results emphasize that managing risk and budget performance is far more critical for improving project success than the nominal choice of methodology alone.
+
+# 6. CONCLUSION
+
+This study combined ART ANOVA, multiple regression, and Monte Carlo simulation to evaluate how project management methodology (Waterfall, Agile, Scrum), project complexity, and key execution drivers (risk, cost, schedule) jointly influence project success. Using a synthetic but structurally realistic dataset of 1,000 projects, the analysis first showed that, on the surface, methodology and complexity both matter: the ART ANOVA results indicated significant main effects for both methodology and complexity level on success_rating, but no significant interaction. This suggests that methodology and complexity each contribute to success in an additive way rather than in a way that depends on specific combinations (e.g., Scrum is effective only when applied on low-complexity projects).
+
+The initial multiple regression model, which included only methodology and complexity, reinforced this message. With Waterfall and High complexity as baselines, Agile projects scored about 3.8 points higher on success_rating, and Scrum projects about 5.1 points higher; at the same time, Medium complexity projects scored roughly 8.3 points higher than High complexity, and Low complexity projects about 16.2 points higher. This model explained 43.8% of the variance in project success, and from this narrower view a portfolio manager might reasonably conclude that “Scrum and low-complexity projects are the safest bets” when the goal is to maximize success scores.
+
+However, once the full set of operational drivers was included—risk_score, budget_overrun_pct, and schedule_variance_days—the picture changed substantially. In the full regression model, the adjusted R² increased to approximately 0.91, indicating that nearly all variance in success_rating could be explained by the combined effect of methodology, complexity, and these execution metrics. Crucially, the methodology coefficients for Agile and Scrum versus Waterfall became very small and statistically non-significant, and the effects of complexity level weakened to only marginal significance. In contrast, risk_score, budget_overrun_pct, and schedule_variance_days remained large, negative, and highly significant. This implies that, after controlling for risk exposure, cost overruns, and schedule delays, the nominal label “Waterfall,” “Agile,” or “Scrum” does not, by itself, drive project success. What matters most is how well the project is executed along these core dimensions.
+
+The Monte Carlo simulation extended this insight into a forward-looking risk perspective by generating 10,000 scenarios per methodology under realistic joint distributions of risk, cost, and schedule. The results showed clear differences in the distribution of outcomes: Waterfall projects had the lowest mean simulated success (76.2), the highest probability of failing to reach 60 (8.1%), and the largest volatility (SD ≈ 11.5), indicating both weaker and less predictable performance. Agile improved this profile, with a higher mean success (79.4), nearly half of scenarios exceeding 80 (47.5%), and only 1.66% of scenarios falling below 60. Scrum performed best overall, with the highest average success (81.0), a majority of scenarios exceeding 80 (54.4%), and an almost negligible failure tail (0.55% below 60), as well as the smallest standard deviation (8.53). The ECDF curves confirmed this dominance: for any threshold of interest, Scrum consistently provided the highest probability of achieving higher success ratings, with Agile in the middle and Waterfall lagging behind.
+
+Finally, the Tornado sensitivity analysis, based on Spearman rank correlations between the drivers and simulated success ratings, highlighted where managers should focus their attention. Across all three methodologies, risk_score showed the strongest (negative) relationship with success, followed by budget_overrun_pct, with schedule_variance_days having a smaller but still adverse effect. This ranking suggests that, in practical portfolio management, organizations gain more by investing in disciplined risk management and budget control than by debating methodology labels in isolation. From a business perspective, the combined evidence from ART ANOVA, multiple regression, and Monte Carlo simulation supports a two-layer recommendation: at the strategic level, favor Agile and especially Scrum over Waterfall as default delivery approaches, because they tend to align with better risk, cost, and schedule profiles; at the operational level, prioritize interventions that directly reduce risk exposure, contain budget overruns, and minimize schedule slippage, as these are the true levers that move project success.
